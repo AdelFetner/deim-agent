@@ -1,0 +1,72 @@
+name: pr-agent-demo
+
+services:
+  gitlab:
+    image: gitlab/gitlab-ce:19.5.1-ce.0@sha256:bb79dc86267c557fd11e7feb0cd9dd506dd02e991ecdd6cae11ca7d7e5d36fc3
+    hostname: gitlab
+    restart: unless-stopped
+    shm_size: 256m
+    mem_limit: 5g
+    ports:
+      - "127.0.0.1:8929:8929"   # GitLab web/API (localhost only)
+      - "127.0.0.1:3333:3333"   # PR-Agent webhook server (shares this network namespace)
+    environment:
+      GITLAB_OMNIBUS_CONFIG: |
+        external_url 'http://localhost:8929'
+        nginx['listen_port'] = 8929
+        puma['worker_processes'] = 0
+        sidekiq['concurrency'] = 5
+        prometheus_monitoring['enable'] = false
+        registry['enable'] = false
+        gitlab_kas['enable'] = false
+        gitlab_rails['usage_ping_enabled'] = false
+    volumes:
+      - gitlab-config:/etc/gitlab
+      - gitlab-logs:/var/log/gitlab
+      - gitlab-data:/var/opt/gitlab
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:8929/-/readiness || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 600s
+
+  pr-agent:
+    image: pragent/pr-agent:0.48.0-gitlab_webhook@sha256:7ab2e70404b2def12f0e5f1b97dcfe32f22fed4c0d5cf6c04aa68c5278d2130e
+    network_mode: "service:gitlab"
+    depends_on:
+      - gitlab
+    restart: unless-stopped
+    environment:
+      - CONFIG__GIT_PROVIDER=gitlab
+      - GITLAB__URL=http://localhost:8929
+      - GITLAB__AUTH_TYPE=private_token
+      - GITLAB__PERSONAL_ACCESS_TOKEN=${PR_AGENT_GITLAB_TOKEN}
+      - GITLAB__SHARED_SECRET=${PR_AGENT_WEBHOOK_SECRET}
+      - PORT=3333
+      - GUNICORN_WORKERS=2
+      - CONFIG__MODEL=${PR_AGENT_MODEL}
+      - CONFIG__FALLBACK_MODELS=[]
+      - CONFIG__CUSTOM_MODEL_MAX_TOKENS=128000
+      - CONFIG__OUTPUT_RUN_DETAILS=true
+      - CONFIG__OUTPUT_RUN_COST=true
+      - CONFIG__ADD_USER_TO_REQUESTS=true
+      - CONFIG__LOG_LEVEL=INFO
+      - CONFIG__AI_TIMEOUT=600   # default 120 s; safety margin for slow reasoning calls
+      - CONFIG__REASONING_EFFORT=medium
+      - CONFIG__ADDITIONAL_REASONING_EFFORT_MODELS=["glm-5.3"]   # unknown to litellm: without this no effort is sent and GLM-5.3 reasons for minutes
+      - OPENAI__KEY=${OPENCODE_GO_API_KEY}
+      - OPENAI__API_BASE=https://opencode.ai/inference/go/openai/v1
+      - 'LITELLM__EXTRA_HEADERS={"User-Agent":"pr-agent-demo/0.48.0","x-opencode-session":"pr-agent-demo"}'
+      - PR_REVIEWER__INLINE_KEY_ISSUES=true
+      - PR_REVIEWER__NUM_MAX_FINDINGS=6
+      - PR_CODE_SUGGESTIONS__COMMITTABLE_CODE_SUGGESTIONS=true
+      - GITLAB__HANDLE_PUSH_TRIGGER=true
+      - GITLAB__PUSH_COMMANDS=["/review","/improve"]   # the fixed-thread auto-resolve sweep only runs inside /improve
+      - GITLAB__AUTO_RESOLVE_FIXED_INLINE_THREADS=true
+      - CONFIG__BOT_USER_INDICATORS=["codium","bot_","bot-","_bot","-bot","deim ai reviewer"]   # loop protection must keep matching the bot's display name after the rename
+
+volumes:
+  gitlab-config:
+  gitlab-logs:
+  gitlab-data:

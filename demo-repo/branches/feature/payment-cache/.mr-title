@@ -1,0 +1,1 @@
+Cache payments in PaymentService to cut DB round-trips
